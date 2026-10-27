@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f7f5f0;
+  --foreground: #2f251f;
+  --brand: #71462f;
+  --brand-dark: #4b3024;
+  --muted: #83776b;
+  --surface: #fffefa;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), "Segoe UI", Arial, sans-serif;
+  font-feature-settings: "ss01" on;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: #e8d4b8;
+  color: #38281d;
+}
+
+.dashboard-background {
+  background:
+    radial-gradient(ellipse at 4% 0%, rgb(227 205 177 / 36%), transparent 34rem),
+    radial-gradient(ellipse at 96% 8%, rgb(226 231 218 / 32%), transparent 30rem),
+    linear-gradient(180deg, #f8f6f1 0%, #f5f2ec 100%);
+}
+
+.dashboard-enter {
+  animation: dashboard-enter 650ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+}
+
+.dashboard-card {
+  transition:
+    transform 220ms ease,
+    box-shadow 220ms ease,
+    border-color 220ms ease;
+}
+
+.dashboard-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 34px -22px rgb(64 43 26 / 38%);
+}
+
+.dashboard-modal-backdrop {
+  animation: dashboard-backdrop-in 180ms ease-out both;
+}
+
+.dashboard-modal {
+  animation: dashboard-modal-in 240ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+}
+
+@keyframes dashboard-enter {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes dashboard-backdrop-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dashboard-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
