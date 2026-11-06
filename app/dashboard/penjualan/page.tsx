@@ -1,8 +1,9 @@
 
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { useAccountPreferences } from "../preferences-provider";
 import ServiceNavigation from "../service-navigation";
 
 type Penjualan = {
@@ -14,414 +15,621 @@ type Penjualan = {
   catatan: string | null;
 };
 
-const formatRupiah = (nilai: number) =>
-  new Intl.NumberFormat("id-ID", {
-    style: "currency",
-    currency: "IDR",
-    maximumFractionDigits: 0,
-  }).format(nilai);
-
 const tanggalHariIni = () => {
   const sekarang = new Date();
-  const lokal = new Date(
-    sekarang.getTime() - sekarang.getTimezoneOffset() * 60000
-  );
-  return lokal.toISOString().slice(0, 10);
+  const tahun = sekarang.getFullYear();
+  const bulan = String(sekarang.getMonth() + 1).padStart(2, "0");
+  const hari = String(sekarang.getDate()).padStart(2, "0");
+
+  return `${tahun}-${bulan}-${hari}`;
 };
 
+function formatTanggal(value: string | null | undefined): string {
+  if (!value) return "-";
+
+  // Mengambil bagian tanggal saja agar aman dari perbedaan zona waktu.
+  const bagianTanggal = String(value).slice(0, 10);
+  const cocok = bagianTanggal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (!cocok) return "-";
+
+  const tahun = Number(cocok[1]);
+  const bulan = Number(cocok[2]);
+  const hari = Number(cocok[3]);
+
+  if (
+    !Number.isInteger(tahun) ||
+    !Number.isInteger(bulan) ||
+    !Number.isInteger(hari) ||
+    bulan < 1 ||
+    bulan > 12 ||
+    hari < 1 ||
+    hari > 31
+  ) {
+    return "-";
+  }
+
+  const tanggal = new Date(tahun, bulan - 1, hari);
+
+  if (
+    tanggal.getFullYear() !== tahun ||
+    tanggal.getMonth() !== bulan - 1 ||
+    tanggal.getDate() !== hari
+  ) {
+    return "-";
+  }
+
+  return new Intl.DateTimeFormat("id-ID", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(tanggal);
+}
+
+function buatNomorTransaksi(tanggal: string, penjualan: Penjualan[]) {
+  const awalan = `PJ-${tanggal.replaceAll("-", "")}-`;
+  const nomorTerpakai = new Set(
+    penjualan
+      .filter((item) => item.tanggal_penjualan.slice(0, 10) === tanggal)
+      .map((item) => item.nomor_transaksi?.trim().toUpperCase())
+      .filter((nomor): nomor is string => Boolean(nomor))
+  );
+
+  let urutan = 1;
+  let nomor = `${awalan}${String(urutan).padStart(3, "0")}`;
+
+  while (nomorTerpakai.has(nomor)) {
+    urutan += 1;
+    nomor = `${awalan}${String(urutan).padStart(3, "0")}`;
+  }
+
+  return nomor;
+}
+
 export default function PenjualanPage() {
-  const [data, setData] = useState<Penjualan[]>([]);
+  const { formatCurrency } = useAccountPreferences();
+
+  const [dataPenjualan, setDataPenjualan] = useState<Penjualan[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [dataDimuat, setDataDimuat] = useState(false);
+  const [menyimpan, setMenyimpan] = useState(false);
+  const [pencarian, setPencarian] = useState("");
+  const [pesan, setPesan] = useState("");
+  const [jenisPesan, setJenisPesan] = useState<"sukses" | "error">("sukses");
+
   const [tanggal, setTanggal] = useState(tanggalHariIni());
-  const [nomorTransaksi, setNomorTransaksi] = useState("");
   const [total, setTotal] = useState("");
   const [metode, setMetode] = useState("Tunai");
   const [catatan, setCatatan] = useState("");
-  const [pencarian, setPencarian] = useState("");
-  const [memuat, setMemuat] = useState(true);
-  const [menyimpan, setMenyimpan] = useState(false);
-  const [pesan, setPesan] = useState("");
-  const [error, setError] = useState("");
+
   const [formTerbuka, setFormTerbuka] = useState(false);
 
-  const muatPenjualan = useCallback(async () => {
-    setMemuat(true);
-    setError("");
+  const tampilkanPesan = (
+    teks: string,
+    jenis: "sukses" | "error"
+  ) => {
+    setPesan(teks);
+    setJenisPesan(jenis);
+  };
 
-    const { data: hasil, error: kesalahan } = await supabase
-      .from("penjualan")
-      .select(
-        "id, tanggal_penjualan, nomor_transaksi, total_penjualan, metode_pembayaran, catatan"
-      )
-      .order("tanggal_penjualan", { ascending: false })
-      .order("id", { ascending: false });
+  const ambilPenjualan = useCallback(async () => {
+    setLoading(true);
 
-    if (kesalahan) {
-      setError(`Gagal memuat data: ${kesalahan.message}`);
-      setData([]);
-    } else {
-      setData((hasil ?? []) as Penjualan[]);
+    try {
+      const { data: userData, error: userError } =
+        await supabase.auth.getUser();
+
+      if (userError || !userData.user) {
+        window.location.href = "/login";
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("penjualan")
+        .select(
+          "id,tanggal_penjualan,nomor_transaksi,total_penjualan,metode_pembayaran,catatan"
+        )
+        .order("tanggal_penjualan", { ascending: false });
+
+      if (error) {
+        console.error("Gagal mengambil data penjualan:", error);
+        tampilkanPesan(
+          "Data penjualan gagal dimuat. Periksa koneksi Supabase.",
+          "error"
+        );
+        return;
+      }
+
+      setDataPenjualan((data ?? []) as Penjualan[]);
+      setDataDimuat(true);
+    } catch (error) {
+      console.error(error);
+      tampilkanPesan("Terjadi kesalahan saat mengambil data.", "error");
+    } finally {
+      setLoading(false);
     }
-
-    setMemuat(false);
   }, []);
 
   useEffect(() => {
-    void muatPenjualan();
-  }, [muatPenjualan]);
+    void ambilPenjualan();
+  }, [ambilPenjualan]);
 
-  async function simpanPenjualan(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  const totalPemasukan = useMemo(
+    () =>
+      dataPenjualan.reduce(
+        (jumlah, item) => jumlah + Number(item.total_penjualan || 0),
+        0
+      ),
+    [dataPenjualan]
+  );
+
+  const hariIni = tanggalHariIni();
+  const bulanIni = hariIni.slice(0, 7);
+  const nomorTransaksi = useMemo(
+    () => buatNomorTransaksi(tanggal, dataPenjualan),
+    [tanggal, dataPenjualan]
+  );
+  const penjualanHariIni = useMemo(
+    () =>
+      dataPenjualan
+        .filter((item) => item.tanggal_penjualan.slice(0, 10) === hariIni)
+        .reduce((jumlah, item) => jumlah + Number(item.total_penjualan || 0), 0),
+    [dataPenjualan, hariIni]
+  );
+  const transaksiHariIni = useMemo(
+    () =>
+      dataPenjualan.filter(
+        (item) => item.tanggal_penjualan.slice(0, 10) === hariIni
+      ).length,
+    [dataPenjualan, hariIni]
+  );
+  const penjualanBulanIni = useMemo(
+    () =>
+      dataPenjualan
+        .filter((item) => item.tanggal_penjualan.slice(0, 7) === bulanIni)
+        .reduce((jumlah, item) => jumlah + Number(item.total_penjualan || 0), 0),
+    [dataPenjualan, bulanIni]
+  );
+
+  const dataTersaring = useMemo(() => {
+    const kata = pencarian.trim().toLowerCase();
+
+    if (!kata) return dataPenjualan;
+
+    return dataPenjualan.filter((item) => {
+      return (
+        String(item.nomor_transaksi ?? "").toLowerCase().includes(kata) ||
+        String(item.metode_pembayaran ?? "").toLowerCase().includes(kata) ||
+        String(item.catatan ?? "").toLowerCase().includes(kata) ||
+        formatTanggal(item.tanggal_penjualan).toLowerCase().includes(kata)
+      );
+    });
+  }, [dataPenjualan, pencarian]);
+
+  async function simpanPenjualan(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     setPesan("");
-    setError("");
+
+    if (!dataDimuat) {
+      tampilkanPesan(
+        "Muat data penjualan terlebih dahulu sebelum membuat transaksi.",
+        "error"
+      );
+      return;
+    }
 
     const nilaiTotal = Number(total);
 
-    if (!tanggal || !total.trim() || !Number.isFinite(nilaiTotal) || nilaiTotal <= 0) {
-      setError("Isi tanggal dan total penjualan dengan benar.");
+    if (!tanggal || formatTanggal(tanggal) === "-") {
+      tampilkanPesan("Tanggal penjualan tidak valid.", "error");
+      return;
+    }
+
+    if (!Number.isFinite(nilaiTotal) || nilaiTotal <= 0) {
+      tampilkanPesan("Masukkan jumlah penjualan yang benar.", "error");
       return;
     }
 
     setMenyimpan(true);
 
-    const transaksi =
-      nomorTransaksi.trim() ||
-      `TRX-${tanggal.replaceAll("-", "")}-${Date.now().toString().slice(-6)}`;
+    try {
+      const { data: userData, error: userError } =
+        await supabase.auth.getUser();
 
-    const { error: kesalahan } = await supabase.from("penjualan").insert({
-      tanggal_penjualan: tanggal,
-      nomor_transaksi: transaksi,
-      total_penjualan: nilaiTotal,
-      metode_pembayaran: metode,
-      catatan: catatan.trim() || null,
-    });
+      if (userError || !userData.user) {
+        tampilkanPesan("Sesi login berakhir. Silakan login kembali.", "error");
+        return;
+      }
 
-    setMenyimpan(false);
+      const { error } = await supabase.from("penjualan").insert({
+        tanggal_penjualan: tanggal,
+        nomor_transaksi: nomorTransaksi,
+        total_penjualan: nilaiTotal,
+        metode_pembayaran: metode,
+        catatan: catatan.trim() || null,
+      });
 
-    if (kesalahan) {
-      setError(`Gagal menyimpan: ${kesalahan.message}`);
-      return;
+      if (error) {
+        console.error("Gagal menyimpan penjualan:", error);
+        tampilkanPesan(
+          `Penjualan gagal disimpan: ${error.message}`,
+          "error"
+        );
+        return;
+      }
+      setTanggal(tanggalHariIni());
+      setTanggal(tanggalHariIni());
+      setTotal("");
+      setMetode("Tunai");
+      setCatatan("");
+      setFormTerbuka(false);
+
+      tampilkanPesan("Data penjualan berhasil disimpan.", "sukses");
+      await ambilPenjualan();
+    } catch (error) {
+      console.error(error);
+      tampilkanPesan("Terjadi kesalahan saat menyimpan penjualan.", "error");
+    } finally {
+      setMenyimpan(false);
     }
-
-    setPesan("Transaksi penjualan berhasil disimpan.");
-    setNomorTransaksi("");
-    setTotal("");
-    setMetode("Tunai");
-    setCatatan("");
-    setFormTerbuka(false);
-
-    await muatPenjualan();
   }
 
-  const dataTerfilter = data.filter((item) => {
-    const kata = pencarian.toLowerCase();
-
-    return (
-      (item.nomor_transaksi ?? "").toLowerCase().includes(kata) ||
-      (item.metode_pembayaran ?? "").toLowerCase().includes(kata) ||
-      (item.catatan ?? "").toLowerCase().includes(kata)
-    );
-  });
-
-  const totalSemua = data.reduce(
-    (jumlah, item) => jumlah + Number(item.total_penjualan || 0),
-    0
-  );
-
-  const totalHariIni = data
-    .filter((item) => item.tanggal_penjualan === tanggalHariIni())
-    .reduce((jumlah, item) => jumlah + Number(item.total_penjualan || 0), 0);
-
   return (
-    <main className="dashboard-background min-h-screen px-4 py-5 text-[#38251c] sm:px-8 sm:py-7">
-      <div className="mx-auto max-w-6xl space-y-5">
-        <ServiceNavigation activeHref="/dashboard/penjualan" />
-        <header className="dashboard-enter relative isolate overflow-hidden rounded-[1.75rem] bg-gradient-to-br from-[#38251f] via-[#65412f] to-[#875640] p-6 text-white shadow-[0_24px_54px_-32px_rgba(64,43,26,0.65)] sm:p-8">
-          <div aria-hidden="true" className="pointer-events-none absolute -right-10 -top-20 -z-10 h-64 w-64 rounded-full border-[34px] border-white/[0.06]" />
-          <div aria-hidden="true" className="pointer-events-none absolute -bottom-28 right-48 -z-10 h-44 w-44 rounded-full bg-[#d6ad74]/10 blur-2xl" />
-          <div className="flex flex-col justify-between gap-6 sm:flex-row sm:items-center">
+    <main className="min-h-screen bg-[#f6f3ed] px-4 py-6 text-[#39291f] sm:px-7 sm:py-8">
+      <ServiceNavigation activeHref="/dashboard/penjualan" />
+
+      <div className="mx-auto max-w-[1400px] space-y-6">
+        <header className="relative isolate overflow-hidden rounded-[30px] bg-gradient-to-br from-[#35251e] via-[#493126] to-[#80583d] p-6 text-white shadow-xl sm:p-8">
+          <div className="pointer-events-none absolute -right-14 -top-24 h-64 w-64 rounded-full border-[34px] border-[#e9c18f]/10" />
+          <div className="pointer-events-none absolute bottom-0 right-40 h-32 w-32 rounded-full bg-[#e9c18f]/10 blur-3xl" />
+
+          <div className="relative flex flex-wrap items-end justify-between gap-6 pr-12">
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#e8c9a7]">
-                Puri Donut&apos;s <span className="px-1 text-white/40">/</span>{" "}
-                Operasional
+              <p className="text-[10px] font-bold uppercase tracking-[0.25em] text-[#e9c18f]">
+                PURI DONUT&apos;S / FINANCIAL MANAGEMENT
               </p>
-              <h1 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
-                Penjualan
+              <h1 className="mt-3 text-3xl font-extrabold tracking-tight sm:text-4xl">
+                Penjualan<span className="text-[#e9c18f]">.</span>
               </h1>
-              <p className="mt-2 max-w-lg text-sm leading-6 text-white/75">
-                Catat transaksi dan pantau pemasukan usaha dalam satu tempat.
+              <p className="mt-2 max-w-lg text-sm leading-6 text-white/70">
+                Catat pemasukan dan pantau perkembangan penjualan dalam satu tempat.
+              </p>
+              <p className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-medium text-white/80">
+                <span className="h-1.5 w-1.5 rounded-full bg-[#b8d5a0]" />
+                {formatTanggal(hariIni)}
               </p>
             </div>
 
             <button
               type="button"
-              aria-expanded={formTerbuka}
-              aria-controls="form-penjualan"
-              onClick={() => {
-                setFormTerbuka(!formTerbuka);
-                setPesan("");
-                setError("");
-              }}
-              className="inline-flex min-h-12 items-center justify-center gap-2 self-start rounded-xl bg-[#f0c99d] px-5 py-3 text-sm font-semibold text-[#49301f] shadow-sm transition duration-200 hover:-translate-y-0.5 hover:bg-[#f8d9b7] hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white active:translate-y-0 sm:self-auto"
+              disabled={loading || !dataDimuat}
+              onClick={() => setFormTerbuka((terbuka) => !terbuka)}
+              className="rounded-xl bg-[#e9c18f] px-5 py-3 text-sm font-bold text-[#49301f] shadow-sm transition hover:-translate-y-0.5 hover:bg-[#f5d5ad] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white disabled:cursor-not-allowed disabled:opacity-60"
             >
-              <span
-                className={`inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#70452d]/10 text-lg transition-transform duration-200 ${
-                  formTerbuka ? "rotate-45" : ""
-                }`}
-                aria-hidden="true"
-              >
-                +
-              </span>
-              {formTerbuka ? "Tutup formulir" : "Tambah penjualan"}
+              {loading ? "Memuat Data..." : formTerbuka ? "Tutup Form" : "+ Tambah Penjualan"}
             </button>
           </div>
         </header>
 
+        {/* NOTIFIKASI */}
         {pesan && (
-          <div role="status" className="dashboard-enter rounded-2xl border border-emerald-200 bg-emerald-50/90 p-4 text-sm font-medium text-emerald-800 shadow-sm">
-            {pesan}
+          <div
+            role={jenisPesan === "error" ? "alert" : "status"}
+            className={`flex items-center justify-between gap-3 rounded-2xl border p-4 text-sm shadow-sm ${
+              jenisPesan === "sukses"
+                ? "border-green-200 bg-green-50 text-green-800"
+                : "border-red-200 bg-red-50 text-red-800"
+            }`}
+          >
+            <span>{pesan}</span>
+            <button onClick={() => setPesan("")} aria-label="Tutup pesan">
+              ×
+            </button>
           </div>
         )}
 
-        {error && (
-          <div role="alert" className="dashboard-enter rounded-2xl border border-rose-200 bg-rose-50/90 p-4 text-sm font-medium text-rose-700 shadow-sm">
-            {error}
+        {/* RINGKASAN */}
+        <section>
+          <div className="mb-4">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a17e60]">
+              Sales Overview
+            </p>
+            <h2 className="mt-1 text-xl font-extrabold">Ringkasan Penjualan</h2>
           </div>
-        )}
 
-        <section className="grid gap-4 sm:grid-cols-2">
-          <article className="dashboard-enter dashboard-card relative overflow-hidden rounded-3xl border border-[#634430] bg-gradient-to-br from-[#493126] via-[#704a36] to-[#9b684b] p-5 text-white shadow-[0_18px_40px_-24px_rgba(64,43,26,0.55)] sm:p-6">
-            <div aria-hidden="true" className="absolute -right-9 -top-12 h-36 w-36 rounded-full border-[22px] border-[#f1c99f]/[0.14]" />
-            <div className="relative flex items-start justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium text-white/75">Pemasukan hari ini</p>
-                <p className="mt-4 break-words text-2xl font-semibold tracking-tight tabular-nums sm:text-3xl">
-                  {formatRupiah(totalHariIni)}
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            {[
+              {
+                judul: "Total Pemasukan",
+                nilai: loading ? "Memuat..." : formatCurrency(totalPemasukan),
+                catatan: "Akumulasi seluruh penjualan",
+                ikon: "↗",
+                utama: true,
+              },
+              {
+                judul: "Penjualan Hari Ini",
+                nilai: loading ? "Memuat..." : formatCurrency(penjualanHariIni),
+                catatan: "Pemasukan pada hari ini",
+                ikon: "◷",
+              },
+              {
+                judul: "Transaksi Hari Ini",
+                nilai: loading ? "..." : String(transaksiHariIni),
+                catatan: "Jumlah transaksi hari ini",
+                ikon: "▤",
+              },
+              {
+                judul: "Penjualan Bulan Ini",
+                nilai: loading ? "Memuat..." : formatCurrency(penjualanBulanIni),
+                catatan: "Pemasukan bulan berjalan",
+                ikon: "▥",
+              },
+            ].map((kartu) => (
+              <article
+                key={kartu.judul}
+                className={`rounded-[25px] border p-5 shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-md sm:p-6 ${
+                  kartu.utama
+                    ? "border-[#634430] bg-gradient-to-br from-[#493126] to-[#936247] text-white"
+                    : "border-[#e9e1d7] bg-white"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className={`text-sm font-semibold ${kartu.utama ? "text-white/75" : "text-[#817264]"}`}>
+                    {kartu.judul}
+                  </p>
+                  <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg ${
+                    kartu.utama ? "bg-white/10 text-[#f0c99d]" : "bg-[#f5ecdf] text-[#95633f]"
+                  }`}>
+                    {kartu.ikon}
+                  </span>
+                </div>
+                <p className="mt-5 break-words text-xl font-extrabold tracking-tight tabular-nums sm:text-2xl">
+                  {kartu.nilai}
                 </p>
-              </div>
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#f1c99f]/15 text-xl text-[#f1c99f]" aria-hidden="true">↗</span>
-            </div>
-            <p className="relative mt-3 text-xs leading-5 text-white/70">
-              Dari transaksi yang tercatat hari ini
-            </p>
-          </article>
-
-          <article className="dashboard-enter dashboard-card rounded-3xl border border-[#eae4db] bg-white/90 p-5 shadow-[0_10px_30px_-22px_rgba(64,43,26,0.28)] sm:p-6" style={{ animationDelay: "90ms" }}>
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium text-[#78695a]">Total penjualan</p>
-                <p className="mt-4 break-words text-2xl font-semibold tracking-tight text-[#35291f] tabular-nums sm:text-3xl">
-                  {formatRupiah(totalSemua)}
+                <p className={`mt-2 text-xs ${kartu.utama ? "text-white/65" : "text-[#a09284]"}`}>
+                  {kartu.catatan}
                 </p>
-              </div>
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#f7eddf] text-lg text-[#91633c]" aria-hidden="true">▤</span>
-            </div>
-            <p className="mt-3 text-xs leading-5 text-[#a08b7c]">
-              {data.length} transaksi tercatat
-            </p>
-          </article>
+              </article>
+            ))}
+          </div>
         </section>
 
+        {/* FORM TAMBAH */}
         {formTerbuka && (
-          <section id="form-penjualan" className="dashboard-enter rounded-3xl border border-[#eae4db] bg-white/95 p-5 shadow-[0_14px_38px_-28px_rgba(64,43,26,0.35)] sm:p-7">
-            <div className="flex items-start gap-4">
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#f7eddf] text-xl text-[#91633c]" aria-hidden="true">＋</span>
-              <div>
-                <h2 className="text-xl font-semibold tracking-tight">
-                  Transaksi baru
-                </h2>
-                <p className="mt-1 text-sm text-[#8a7568]">
-                  Lengkapi detail penjualan di bawah ini.
-                </p>
-              </div>
+          <section className="overflow-hidden rounded-[28px] border border-[#e9e0d5] bg-white shadow-sm">
+            <div className="border-b border-[#eee8df] bg-gradient-to-r from-[#fffaf2] to-white px-5 py-5 sm:px-7">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a17e60]">
+                New Sales Entry
+              </p>
+              <h2 className="mt-1 text-xl font-extrabold">
+                Tambah Data Penjualan
+              </h2>
+              <p className="mt-1 text-xs text-[#9b8d7e]">
+                Nomor transaksi dan ringkasan nominal akan disiapkan otomatis.
+              </p>
             </div>
 
-            <form onSubmit={simpanPenjualan} className="mt-6 space-y-5">
-              <div className="grid gap-5 sm:grid-cols-2">
-                <label className="block text-sm font-semibold text-[#59483a]">
-                  Tanggal Penjualan *
+            <form onSubmit={simpanPenjualan} className="space-y-5 p-5 sm:p-7">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-sm font-semibold">
+                    Tanggal Penjualan
+                  </label>
                   <input
                     type="date"
-                    required
                     value={tanggal}
                     onChange={(e) => setTanggal(e.target.value)}
-                    className="mt-2 h-12 w-full rounded-xl border border-[#e5d8cb] bg-[#fcfbf9] px-4 text-sm font-normal text-[#45372b] outline-none transition placeholder:text-[#b0a194] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
+                    required
+                    className="w-full rounded-xl border border-[#e8e0d6] bg-[#fcfaf7] px-4 py-3 text-sm outline-none transition focus:border-[#ad8058] focus:ring-4 focus:ring-[#ad8058]/10"
                   />
-                </label>
+                </div>
 
-                <label className="block text-sm font-semibold text-[#59483a]">
-                  Nomor Transaksi
+                <div>
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <label htmlFor="nomor-transaksi" className="text-sm font-semibold">
+                      Nomor Transaksi
+                    </label>
+                    <span className="rounded-full bg-[#edf3e8] px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-[#647b54]">
+                      Otomatis
+                    </span>
+                  </div>
                   <input
+                    id="nomor-transaksi"
                     type="text"
                     value={nomorTransaksi}
-                    onChange={(e) => setNomorTransaksi(e.target.value)}
-                    placeholder="Kosongkan untuk nomor otomatis"
-                    className="mt-2 h-12 w-full rounded-xl border border-[#e5d8cb] bg-[#fcfbf9] px-4 text-sm font-normal text-[#45372b] outline-none transition placeholder:text-[#b0a194] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
+                    readOnly
+                    aria-describedby="nomor-transaksi-info"
+                    className="w-full rounded-xl border border-[#e8e0d6] bg-[#f7f4ee] px-4 py-3 text-sm font-bold tracking-wide text-[#62462f] outline-none"
                   />
-                </label>
+                  <p id="nomor-transaksi-info" className="mt-2 text-xs text-[#9b8d7e]">
+                    Dibuat sesuai tanggal dan urutan transaksi.
+                  </p>
+                </div>
 
-                <label className="block text-sm font-semibold text-[#59483a]">
-                  Total Penjualan (Rp) *
+                <div>
+                  <label className="mb-2 block text-sm font-semibold">
+                    Total Penjualan (Rp)
+                  </label>
                   <input
                     type="number"
                     min="1"
                     step="1"
-                    required
                     value={total}
                     onChange={(e) => setTotal(e.target.value)}
-                    placeholder="Contoh: 150000"
-                    className="mt-2 h-12 w-full rounded-xl border border-[#e5d8cb] bg-[#fcfbf9] px-4 text-sm font-normal text-[#45372b] outline-none transition placeholder:text-[#b0a194] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
-                  />
-                </label>
-
-                <label className="block text-sm font-semibold text-[#59483a]">
-                  Metode Pembayaran *
-                  <select
+                    placeholder="Masukkan jumlah penjualan"
                     required
+                    className="w-full rounded-xl border border-[#e8e0d6] bg-[#fcfaf7] px-4 py-3 text-sm outline-none transition focus:border-[#ad8058] focus:ring-4 focus:ring-[#ad8058]/10"
+                  />
+                  <p className="mt-2 text-xs text-[#8e7d6d]" aria-live="polite">
+                    Pratinjau:{" "}
+                    <span className="font-bold text-[#60452f]">
+                      {Number(total) > 0
+                        ? formatCurrency(Number(total))
+                        : "Masukkan nominal penjualan"}
+                    </span>
+                  </p>
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm font-semibold">
+                    Metode Pembayaran
+                  </label>
+                  <select
                     value={metode}
                     onChange={(e) => setMetode(e.target.value)}
-                    className="mt-2 h-12 w-full rounded-xl border border-[#e5d8cb] bg-[#fcfbf9] px-4 text-sm font-normal text-[#45372b] outline-none transition focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
+                    className="w-full rounded-xl border border-[#e8e0d6] bg-[#fcfaf7] px-4 py-3 text-sm outline-none transition focus:border-[#ad8058] focus:ring-4 focus:ring-[#ad8058]/10"
                   >
                     <option value="Tunai">Tunai</option>
                     <option value="Transfer">Transfer</option>
                     <option value="QRIS">QRIS</option>
                     <option value="Lainnya">Lainnya</option>
                   </select>
-                </label>
+                </div>
               </div>
 
-              <label className="block text-sm font-semibold text-[#59483a]">
-                Catatan
+              <div>
+                <label className="mb-2 block text-sm font-semibold">
+                  Catatan
+                </label>
                 <textarea
                   value={catatan}
                   onChange={(e) => setCatatan(e.target.value)}
                   rows={3}
                   placeholder="Catatan tambahan (opsional)"
-                  className="mt-2 w-full rounded-xl border border-[#e5d8cb] bg-[#fcfbf9] px-4 py-3 text-sm font-normal text-[#45372b] outline-none transition placeholder:text-[#b0a194] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
+                  className="w-full resize-none rounded-xl border border-[#e8e0d6] bg-[#fcfaf7] px-4 py-3 text-sm outline-none transition focus:border-[#ad8058] focus:ring-4 focus:ring-[#ad8058]/10"
                 />
-              </label>
+              </div>
 
-              <div className="flex flex-wrap gap-3">
-                <button
-                  type="submit"
-                  disabled={menyimpan}
-                  className="min-h-12 rounded-xl bg-[#65412f] px-6 py-3 text-sm font-semibold text-white shadow-[0_8px_18px_-10px_rgba(74,48,36,0.8)] transition hover:-translate-y-0.5 hover:bg-[#4b3024] hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#70452f] active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {menyimpan ? "Menyimpan..." : "Simpan Penjualan"}
-                </button>
-
+              <div className="flex flex-wrap justify-end gap-3 border-t border-[#eee8df] pt-5">
                 <button
                   type="button"
                   onClick={() => setFormTerbuka(false)}
-                  className="min-h-12 rounded-xl border border-[#e5d8cb] bg-white px-6 py-3 text-sm font-semibold text-[#705a48] transition hover:border-[#cbb49c] hover:bg-[#fcfaf7] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#a96732]"
+                  className="rounded-xl border border-[#e8e0d6] px-5 py-3 text-sm font-semibold text-[#796958] transition hover:bg-[#f8f4ed]"
                 >
                   Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={menyimpan}
+                  className="rounded-xl bg-[#493126] px-6 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[#684831] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {menyimpan ? "Menyimpan..." : "Simpan Penjualan"}
                 </button>
               </div>
             </form>
           </section>
         )}
 
-        <section className="dashboard-enter overflow-hidden rounded-3xl border border-[#eae4db] bg-white/95 shadow-[0_14px_38px_-28px_rgba(64,43,26,0.35)]">
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#f0e7df] p-5 sm:px-6 sm:py-5">
+        {/* DAFTAR TRANSAKSI */}
+        <section className="overflow-hidden rounded-[26px] border border-[#e9e0d5] bg-white shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#eee8df] px-5 py-5 sm:px-7">
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#a07853]">
-                Arsip transaksi
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a17e60]">
+                Sales Records
               </p>
-              <h2 className="mt-1 text-lg font-semibold tracking-tight text-[#3b2b21]">
-                Riwayat penjualan
+              <h2 className="mt-1 text-xl font-extrabold">
+                Riwayat Penjualan
               </h2>
-              <p className="mt-1 text-xs text-[#8a7568]">
-                {data.length} transaksi tersimpan
+              <p className="mt-1 text-xs text-[#9b8d7e]">
+                Daftar transaksi yang tersimpan.
               </p>
             </div>
 
             <button
-              type="button"
-              onClick={() => void muatPenjualan()}
-              disabled={memuat}
-              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-[#e5ded4] bg-white px-4 py-2 text-sm font-semibold text-[#705a48] transition hover:border-[#cbb49c] hover:bg-[#faf7f1] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8d6245] disabled:cursor-wait disabled:opacity-50"
+              onClick={ambilPenjualan}
+              disabled={loading}
+              className="rounded-xl border border-[#e9e0d5] px-4 py-2.5 text-xs font-bold text-[#70452d] hover:bg-[#faf6ef] disabled:opacity-50"
             >
-              <span aria-hidden="true" className={memuat ? "animate-spin" : ""}>↻</span>
-              {memuat ? "Memuat..." : "Perbarui"}
+              {loading ? "Memuat..." : "↻ Muat Ulang"}
             </button>
           </div>
 
-          <div className="p-4 sm:p-6">
-            <label className="relative block">
-              <span className="sr-only">Cari transaksi penjualan</span>
-              <span className="pointer-events-none absolute inset-y-0 left-4 flex items-center text-[#9b8876]" aria-hidden="true">⌕</span>
+          <div className="p-5 sm:p-7">
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
               <input
+                aria-label="Cari riwayat penjualan"
                 type="search"
                 value={pencarian}
                 onChange={(e) => setPencarian(e.target.value)}
-                placeholder="Cari nomor transaksi, metode, atau catatan"
-                className="h-12 w-full rounded-xl border border-[#e5ded4] bg-[#faf8f4] py-3 pl-11 pr-4 text-sm text-[#45372b] outline-none transition placeholder:text-[#a08b7c] hover:border-[#d3c4b2] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
+                placeholder="Cari nomor transaksi, tanggal, metode pembayaran..."
+                className="min-w-[220px] flex-1 rounded-xl border border-[#e9e0d5] bg-[#fcfaf7] px-4 py-3 text-sm outline-none transition focus:border-[#ad8058] focus:ring-4 focus:ring-[#ad8058]/10"
               />
-            </label>
+              {!loading && (
+                <span className="rounded-full bg-[#f5eee4] px-3 py-2 text-xs font-semibold text-[#91633c]">
+                  {dataTersaring.length} dari {dataPenjualan.length} transaksi
+                </span>
+              )}
+            </div>
 
-            <div className="mt-4 overflow-x-auto rounded-2xl border border-[#eee8df]">
-              <table className="w-full min-w-[700px] text-left text-sm">
-                <thead className="bg-[#faf8f4]">
-                  <tr className="border-b border-[#eee3d8] text-[10px] uppercase tracking-[0.14em] text-[#8a7568]">
-                    <th scope="col" className="px-4 py-3.5 font-semibold">Tanggal</th>
-                    <th scope="col" className="px-4 py-3.5 font-semibold">No. Transaksi</th>
-                    <th scope="col" className="px-4 py-3.5 font-semibold">Pembayaran</th>
-                    <th scope="col" className="px-4 py-3.5 font-semibold">Catatan</th>
-                    <th scope="col" className="px-4 py-3.5 text-right font-semibold">Total</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {memuat ? (
-                    <tr>
-                      <td colSpan={5} className="px-3 py-12 text-center text-sm text-[#8a7568]">
-                        <span className="mx-auto mb-3 block h-7 w-7 animate-spin rounded-full border-[3px] border-[#e8ded1] border-t-[#70452d]" />
-                        Memuat transaksi...
-                      </td>
+            {loading ? (
+              <div className="py-12 text-center text-sm text-[#958679]">
+                Sedang mengambil data penjualan...
+              </div>
+            ) : dataTersaring.length === 0 ? (
+              <div className="py-12 text-center">
+                <div className="text-4xl text-[#b99a7a]">▤</div>
+                <p className="mt-3 font-bold">
+                  {pencarian.trim() ? "Transaksi tidak ditemukan" : "Belum ada data penjualan"}
+                </p>
+                <p className="mt-1 text-xs text-[#9b8d7e]">
+                  {pencarian.trim()
+                    ? "Coba kata kunci atau tanggal yang berbeda."
+                    : "Tambahkan transaksi untuk melihatnya di sini."}
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[720px] text-left">
+                  <thead>
+                    <tr className="border-b border-[#eee8df] text-[11px] uppercase tracking-wider text-[#9b8d7e]">
+                      <th className="px-3 py-4 font-bold">Tanggal</th>
+                      <th className="px-3 py-4 font-bold">Nomor Transaksi</th>
+                      <th className="px-3 py-4 font-bold">Metode</th>
+                      <th className="px-3 py-4 font-bold">Catatan</th>
+                      <th className="px-3 py-4 text-right font-bold">Total</th>
                     </tr>
-                  ) : dataTerfilter.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="px-3 py-12 text-center text-sm text-[#8a7568]">
-                        <span className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-[#f7eddf] text-lg text-[#91633c]" aria-hidden="true">⌕</span>
-                        {pencarian ? "Tidak ada transaksi yang cocok dengan pencarian." : "Belum ada transaksi pada daftar ini."}
-                      </td>
-                    </tr>
-                  ) : (
-                    dataTerfilter.map((item, index) => (
+                  </thead>
+                  <tbody>
+                    {dataTersaring.map((item) => (
                       <tr
                         key={item.id}
-                        style={{ animationDelay: `${Math.min(index * 35, 350)}ms` }}
-                        className="dashboard-enter border-b border-[#f5eee8] transition-colors last:border-0 hover:bg-[#fdfaf7]"
+                        className="border-b border-[#f1ede7] transition hover:bg-[#fcfaf7]"
                       >
-                        <td className="whitespace-nowrap px-4 py-4 text-xs text-[#766858]">
-                          {item.tanggal_penjualan}
+                        <td className="px-3 py-4 text-sm text-[#77685a]">
+                          {formatTanggal(item.tanggal_penjualan)}
                         </td>
-                        <td className="px-4 py-4 font-medium text-[#49382b]">
+                        <td className="px-3 py-4 text-sm font-bold">
                           {item.nomor_transaksi || "-"}
                         </td>
-                        <td className="px-4 py-4">
-                          <span className="inline-flex rounded-full border border-[#eee5d9] bg-[#faf7f1] px-2.5 py-1 text-[11px] font-semibold text-[#80644e]">
+                        <td className="px-3 py-4">
+                          <span className="rounded-full bg-[#f5eee4] px-3 py-1.5 text-xs font-semibold text-[#91633c]">
                             {item.metode_pembayaran || "-"}
                           </span>
                         </td>
-                        <td className="max-w-[200px] truncate px-4 py-4 text-[#8a7568]">
+                        <td className="max-w-[180px] truncate px-3 py-4 text-sm text-[#8f8174]">
                           {item.catatan || "-"}
                         </td>
-                        <td className="whitespace-nowrap px-4 py-4 text-right font-semibold tracking-tight text-[#49382b] tabular-nums">
-                          {formatRupiah(Number(item.total_penjualan || 0))}
+                        <td className="px-3 py-4 text-right text-sm font-extrabold text-[#548466]">
+                          {formatCurrency(Number(item.total_penjualan || 0))}
                         </td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
-            <p className="mt-3 text-xs leading-5 text-[#938678]">
-              Nilai total penjualan dihitung dari seluruh transaksi yang dimuat, tidak hanya hasil pencarian.
-            </p>
+            {!loading && dataTersaring.length > 0 && (
+              <p className="mt-4 text-xs text-[#9b8d7e]">
+                Menampilkan {dataTersaring.length} transaksi.
+              </p>
+            )}
           </div>
         </section>
+
+        <footer className="pb-3 text-center text-xs text-[#a18b77]">
+          © {new Date().getFullYear()} PURI DONUT&apos;S · Sales Management
+        </footer>
       </div>
     </main>
   );

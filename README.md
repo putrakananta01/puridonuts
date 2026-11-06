@@ -20,6 +20,15 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Employee and payroll data
+
+Before using the employee and payroll page, apply
+[`20261105000000_add_offline_employee_payroll.sql`](./supabase/migrations/20261105000000_add_offline_employee_payroll.sql)
+to the Supabase database. The page caches data per signed-in account in that
+browser, keeps changes made offline in a sync queue, and uploads them when the
+connection returns. Offline data is device-specific; open the page online at
+least once to cache the latest records.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

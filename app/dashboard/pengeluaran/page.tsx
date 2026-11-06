@@ -1,413 +1,1085 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
-import ServiceNavigation from "../service-navigation";
+
+type Barang = {
+  id: number;
+  nama: string;
+  harga: string;
+};
 
 type Pengeluaran = {
   id: number;
   tanggal_pengeluaran: string;
   kategori: string;
-  keterangan: string;
   jumlah: number;
-  metode_pembayaran: string | null;
-  catatan: string | null;
-  created_at: string;
 };
 
-const formatRupiah = (angka: number) =>
+type Penjualan = {
+  id: number;
+  tanggal_penjualan: string;
+  total_penjualan: number;
+};
+
+const kategoriPilihan = [
+  "Bahan Baku",
+  "Peralatan",
+  "Kemasan",
+  "Operasional",
+  "Listrik & Air",
+  "Transportasi",
+  "Lainnya",
+];
+
+const rupiah = (angka: number) =>
   new Intl.NumberFormat("id-ID", {
     style: "currency",
     currency: "IDR",
     maximumFractionDigits: 0,
-  }).format(angka || 0);
+  }).format(Number(angka) || 0);
 
-const formatTanggal = (tanggal: string) => {
-  const [tahun, bulan, hari] = tanggal.split("-").map(Number);
-  return new Intl.DateTimeFormat("id-ID", {
-    day: "2-digit",
-    month: "short",
+function hariIni() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
+    2,
+    "0"
+  )}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function awalBulan() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
+    2,
+    "0"
+  )}-01`;
+}
+
+function formatTanggal(tanggal: string) {
+  if (!tanggal) return "-";
+
+  return new Date(tanggal + "T00:00:00").toLocaleDateString("id-ID", {
+    day: "numeric",
+    month: "long",
     year: "numeric",
-  }).format(new Date(tahun, bulan - 1, hari));
-};
+  });
+}
+
+async function bacaDataPeriode(tanggalMulai: string, tanggalAkhir: string) {
+  const [hasilPenjualan, hasilPengeluaran] = await Promise.all([
+    supabase
+      .from("penjualan")
+      .select("id, tanggal_penjualan, total_penjualan")
+      .gte("tanggal_penjualan", tanggalMulai)
+      .lte("tanggal_penjualan", tanggalAkhir)
+      .order("tanggal_penjualan", { ascending: false }),
+    supabase
+      .from("pengeluaran")
+      .select("id, tanggal_pengeluaran, kategori, jumlah")
+      .gte("tanggal_pengeluaran", tanggalMulai)
+      .lte("tanggal_pengeluaran", tanggalAkhir)
+      .order("tanggal_pengeluaran", { ascending: false }),
+  ]);
+
+  if (hasilPenjualan.error) {
+    throw new Error(
+      "Gagal mengambil data penjualan: " + hasilPenjualan.error.message
+    );
+  }
+
+  if (hasilPengeluaran.error) {
+    throw new Error(
+      "Gagal mengambil data pengeluaran: " + hasilPengeluaran.error.message
+    );
+  }
+
+  return {
+    penjualan: hasilPenjualan.data || [],
+    pengeluaran: hasilPengeluaran.data || [],
+  };
+}
 
 export default function PengeluaranPage() {
-  const [data, setData] = useState<Pengeluaran[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [tanggal, setTanggal] = useState(hariIni());
+  const [kategori, setKategori] = useState("Bahan Baku");
+
+  const [tanggalMulai, setTanggalMulai] = useState(awalBulan());
+  const [tanggalAkhir, setTanggalAkhir] = useState(hariIni());
+
+  const [barang, setBarang] = useState<Barang[]>([
+    { id: 1, nama: "", harga: "" },
+  ]);
+  const idBarangBerikutnya = useRef(2);
+
+  const [pengeluaran, setPengeluaran] = useState<Pengeluaran[]>([]);
+  const [penjualan, setPenjualan] = useState<Penjualan[]>([]);
+
+  const [loading, setLoading] = useState(false);
+  const [memuat, setMemuat] = useState(true);
+  const [formTerbuka, setFormTerbuka] = useState(false);
   const [pesan, setPesan] = useState("");
 
-  const [tanggal, setTanggal] = useState(
-    new Date().toLocaleDateString("en-CA")
+  const totalPembelian = barang.reduce(
+    (total, item) => total + (Number(item.harga) || 0),
+    0
   );
-  const [kategori, setKategori] = useState("Bahan Baku");
-  const [keterangan, setKeterangan] = useState("");
-  const [jumlah, setJumlah] = useState("");
-  const [metode, setMetode] = useState("Tunai");
-  const [catatan, setCatatan] = useState("");
 
-  async function ambilData() {
-    setLoading(true);
-
-    const { data: hasil, error } = await supabase
-      .from("pengeluaran")
-      .select("*")
-      .order("tanggal_pengeluaran", { ascending: false });
-
-    if (error) {
-      setPesan("Gagal mengambil data: " + error.message);
-      setData([]);
-    } else {
-      setData((hasil ?? []) as Pengeluaran[]);
-      setPesan("");
-    }
-
-    setLoading(false);
-  }
-
-  useEffect(() => {
-    void ambilData();
-  }, []);
-
-  async function simpanPengeluaran(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setPesan("");
-
-    const nilaiJumlah = Number(jumlah);
-
-    if (!tanggal || !keterangan.trim() || !jumlah || nilaiJumlah <= 0) {
-      setPesan("Lengkapi data dan masukkan jumlah lebih dari nol.");
-      return;
-    }
-
-    setSaving(true);
-
-    const { error } = await supabase.from("pengeluaran").insert({
-      tanggal_pengeluaran: tanggal,
-      kategori,
-      keterangan: keterangan.trim(),
-      jumlah: nilaiJumlah,
-      metode_pembayaran: metode,
-      catatan: catatan.trim() || null,
-    });
-
-    setSaving(false);
-
-    if (error) {
-      setPesan("Gagal menyimpan: " + error.message);
-      return;
-    }
-
-    setPesan("Pengeluaran berhasil disimpan.");
-    setKeterangan("");
-    setJumlah("");
-    setCatatan("");
-
-    await ambilData();
-  }
-
-  const totalPengeluaran = data.reduce(
+  const totalPengeluaran = pengeluaran.reduce(
     (total, item) => total + Number(item.jumlah || 0),
     0
   );
 
-  const totalBulanIni = data
-    .filter((item) => item.tanggal_pengeluaran?.slice(0, 7) === tanggal.slice(0, 7))
-    .reduce((total, item) => total + Number(item.jumlah || 0), 0);
+  const totalPenjualan = penjualan.reduce(
+    (total, item) => total + Number(item.total_penjualan || 0),
+    0
+  );
+
+  const labaRugi = totalPenjualan - totalPengeluaran;
+
+  async function ambilData() {
+    if (tanggalMulai > tanggalAkhir) {
+      setPesan("Tanggal awal tidak boleh melebihi tanggal akhir.");
+      setMemuat(false);
+      return;
+    }
+
+    setMemuat(true);
+    setPesan("");
+
+    try {
+      const data = await bacaDataPeriode(tanggalMulai, tanggalAkhir);
+      setPenjualan(data.penjualan);
+      setPengeluaran(data.pengeluaran);
+    } catch (error) {
+      setPesan(
+        error instanceof Error
+          ? error.message
+          : "Terjadi kesalahan saat mengambil data keuangan."
+      );
+    } finally {
+      setMemuat(false);
+    }
+  }
+
+  useEffect(() => {
+    if (tanggalMulai > tanggalAkhir) return;
+
+    let masihAktif = true;
+
+    async function muatDataPeriode() {
+      try {
+        const data = await bacaDataPeriode(tanggalMulai, tanggalAkhir);
+        if (!masihAktif) return;
+        setPenjualan(data.penjualan);
+        setPengeluaran(data.pengeluaran);
+        setPesan("");
+      } catch (error) {
+        if (!masihAktif) return;
+        setPesan(
+          error instanceof Error
+            ? error.message
+            : "Terjadi kesalahan saat mengambil data keuangan."
+        );
+      } finally {
+        if (masihAktif) setMemuat(false);
+      }
+    }
+
+    void muatDataPeriode();
+
+    return () => {
+      masihAktif = false;
+    };
+  }, [tanggalMulai, tanggalAkhir]);
+
+  function tambahBarang() {
+    const id = idBarangBerikutnya.current;
+    idBarangBerikutnya.current += 1;
+    setBarang((sebelumnya) => [
+      ...sebelumnya,
+      {
+        id,
+        nama: "",
+        harga: "",
+      },
+    ]);
+  }
+
+  function hapusBarang(id: number) {
+    if (barang.length === 1) {
+      setPesan("Minimal harus ada satu barang.");
+      return;
+    }
+
+    setBarang((sebelumnya) =>
+      sebelumnya.filter((item) => item.id !== id)
+    );
+
+    setPesan("");
+  }
+
+  function ubahBarang(
+    id: number,
+    field: "nama" | "harga",
+    nilai: string
+  ) {
+    setBarang((sebelumnya) =>
+      sebelumnya.map((item) =>
+        item.id === id ? { ...item, [field]: nilai } : item
+      )
+    );
+  }
+
+  async function simpanPembelian(
+    e: React.FormEvent<HTMLFormElement>
+  ) {
+    e.preventDefault();
+    setPesan("");
+
+    if (!tanggal) {
+      setPesan("Tanggal pembelian harus diisi.");
+      return;
+    }
+
+    if (
+      barang.some(
+        (item) =>
+          !item.nama.trim() ||
+          !item.harga ||
+          !Number.isFinite(Number(item.harga)) ||
+          Number(item.harga) <= 0
+      )
+    ) {
+      setPesan("Lengkapi nama dan harga setiap barang.");
+      return;
+    }
+
+    if (totalPembelian <= 0) {
+      setPesan("Total pembelian harus lebih dari nol.");
+      return;
+    }
+
+    const rincian = barang
+      .map(
+        (item) =>
+          `${item.nama.trim()} (${rupiah(Number(item.harga))})`
+      )
+      .join(", ");
+
+    setLoading(true);
+
+    const { error } = await supabase.from("pengeluaran").insert([
+      {
+        tanggal_pengeluaran: tanggal,
+        kategori: `${kategori}: ${rincian}`,
+        jumlah: totalPembelian,
+      },
+    ]);
+
+    if (error) {
+      setPesan("Gagal menyimpan pembelian: " + error.message);
+      setLoading(false);
+      return;
+    }
+
+    const idBarangBaru = idBarangBerikutnya.current;
+    idBarangBerikutnya.current += 1;
+    setBarang([{ id: idBarangBaru, nama: "", harga: "" }]);
+    setTanggal(hariIni());
+    setKategori("Bahan Baku");
+    setFormTerbuka(false);
+    setPesan("Pembelian berhasil disimpan.");
+
+    await ambilData();
+    setLoading(false);
+  }
+
+  async function hapusPengeluaran(id: number) {
+    const yakin = window.confirm(
+      "Apakah kamu yakin ingin menghapus nota pembelian ini?"
+    );
+
+    if (!yakin) return;
+
+    const { error } = await supabase
+      .from("pengeluaran")
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      setPesan("Gagal menghapus: " + error.message);
+      return;
+    }
+
+    setPesan("Nota pembelian berhasil dihapus.");
+    await ambilData();
+  }
+
+  function cetakLaporan() {
+    window.print();
+  }
 
   return (
-    <main className="dashboard-background min-h-screen px-4 py-5 text-[#38251c] sm:px-8 sm:py-7">
-      <div className="mx-auto max-w-6xl space-y-5">
-        <ServiceNavigation activeHref="/dashboard/pengeluaran" />
-        <header className="dashboard-enter relative isolate overflow-hidden rounded-[1.75rem] bg-gradient-to-br from-[#38251f] via-[#65412f] to-[#875640] p-6 text-white shadow-[0_24px_54px_-32px_rgba(64,43,26,0.65)] sm:p-8">
-          <div aria-hidden="true" className="pointer-events-none absolute -right-10 -top-20 h-64 w-64 rounded-full border-[34px] border-white/[0.06]" />
-          <div className="relative z-10 flex flex-col justify-between gap-6 sm:flex-row sm:items-center">
-            <div>
-              <a
-                href="/dashboard"
-                className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-medium text-white/85 transition hover:border-white/30 hover:bg-white/15 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-              >
-                <span aria-hidden="true">←</span> Dashboard
-              </a>
-              <p className="mt-5 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#e8c9a7]">
-                Puri Donut&apos;s <span className="px-1 text-white/40">/</span>{" "}
-                Keuangan
-              </p>
-              <h1 className="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl">
-                Pengeluaran
+    <div className="dashboard-background min-h-screen overflow-hidden text-[#39291f]">
+
+      <style jsx global>{`
+        @media print {
+          @page {
+            size: A4;
+            margin: 15mm;
+          }
+
+          body {
+            background: white !important;
+            color: #222 !important;
+          }
+
+          .no-print {
+            display: none !important;
+          }
+
+          .print-area {
+            display: block !important;
+            width: 100% !important;
+            border: none !important;
+            box-shadow: none !important;
+            background: white !important;
+          }
+
+          .print-area table {
+            width: 100%;
+            border-collapse: collapse;
+          }
+
+          .print-area th,
+          .print-area td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            font-size: 11px;
+          }
+
+          .print-area th {
+            background: #f1eee9 !important;
+            print-color-adjust: exact;
+          }
+        }
+      `}</style>
+
+      {/* HEADER */}
+      <header className="no-print sticky top-0 z-30 border-b border-[#eadfce]/80 bg-white/85 shadow-[0_8px_24px_-22px_rgba(64,43,26,0.5)] backdrop-blur-xl">
+        <div className="mx-auto flex min-h-[72px] max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:px-10">
+          <Link href="/dashboard" className="group flex min-w-0 items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#8d6242] to-[#563721] text-lg font-bold text-white shadow-md shadow-[#795238]/20 transition duration-300 group-hover:-rotate-3 group-hover:scale-105 sm:h-11 sm:w-11">
+              P
+            </div>
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-bold tracking-wide sm:text-base">
+                PURI DONUT&apos;S
               </h1>
-              <p className="mt-2 max-w-lg text-sm leading-6 text-white/75">
-                Catat biaya usaha dan pantau penggunaannya dengan mudah.
+              <p className="hidden text-[10px] tracking-[0.2em] text-[#a4774d] sm:block">
+                FINANCIAL MANAGEMENT
               </p>
             </div>
-            <span className="inline-flex items-center gap-2 self-start rounded-full border border-white/15 bg-white/10 px-3 py-2 text-xs font-medium text-white/85 sm:self-auto">
-              <span
-                className="h-1.5 w-1.5 rounded-full bg-[#e7c9a4]"
-                aria-hidden="true"
-              />
-              Pencatatan biaya
-            </span>
-          </div>
-        </header>
+          </Link>
 
-        {pesan && (
-          <div
-            role={pesan.startsWith("Gagal") ? "alert" : "status"}
-            className={`dashboard-enter rounded-2xl border p-4 text-sm font-medium shadow-sm ${
-              pesan.startsWith("Gagal")
-                ? "border-rose-200 bg-rose-50/90 text-rose-700"
-                : pesan.startsWith("Lengkapi")
-                  ? "border-amber-200 bg-amber-50/90 text-amber-800"
-                  : "border-emerald-200 bg-emerald-50/90 text-emerald-800"
-            }`}
+          <Link
+            href="/dashboard"
+            aria-label="Kembali ke Dashboard"
+            className="group inline-flex shrink-0 items-center gap-2 rounded-xl border border-[#eadfd3] bg-white/90 p-2 pr-3 text-sm font-semibold text-[#62452f] shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-[#cdb69d] hover:bg-[#fcfaf7] hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#a96732] motion-reduce:transform-none sm:gap-3 sm:pr-4"
           >
+            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#f5ede3] text-[#795238] transition-colors group-hover:bg-[#795238] group-hover:text-white">
+              <svg
+                aria-hidden="true"
+                className="h-4 w-4 transition-transform group-hover:-translate-x-0.5 motion-reduce:transform-none"
+                fill="none"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="1.8"
+                viewBox="0 0 24 24"
+              >
+                <path d="M19 12H5" />
+                <path d="m12 19-7-7 7-7" />
+              </svg>
+            </span>
+            <span className="hidden sm:inline">Kembali ke Dashboard</span>
+          </Link>
+        </div>
+      </header>
+
+      {/* KONTEN UTAMA */}
+      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8 lg:px-10 lg:py-10">
+
+        {/* JUDUL */}
+        <section className="no-print dashboard-enter relative mb-6 overflow-hidden rounded-[28px] bg-gradient-to-br from-[#37251d] via-[#563721] to-[#80583d] px-5 py-7 text-white shadow-[0_24px_60px_-34px_rgba(64,43,26,0.7)] sm:mb-8 sm:px-8 sm:py-9 lg:px-10">
+          <div className="pointer-events-none absolute -right-16 -top-24 h-64 w-64 rounded-full border border-white/10 bg-white/[0.04] sm:h-80 sm:w-80" />
+          <div className="pointer-events-none absolute -bottom-28 right-24 h-52 w-52 rounded-full border border-[#e7c68e]/15" />
+          <div className="relative max-w-2xl">
+            <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-[#f0d7b3] backdrop-blur-sm sm:text-xs">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#e7c68e] shadow-[0_0_10px_2px_rgba(231,198,142,0.45)]" />
+              Manajemen keuangan
+            </span>
+            <h2 className="mt-4 text-3xl font-bold tracking-tight sm:text-4xl lg:text-5xl">
+              Pengeluaran
+            </h2>
+            <p className="mt-3 max-w-xl text-sm leading-6 text-white/70 sm:text-base">
+              Catat pembelian dan pantau arus biaya usaha dengan lebih rapi.
+            </p>
+          </div>
+        </section>
+
+        {/* FILTER PERIODE */}
+        <section className="no-print dashboard-enter dashboard-card mb-5 rounded-2xl border border-[#eadfce]/90 bg-white/90 p-4 shadow-[0_12px_34px_-26px_rgba(64,43,26,0.36)] sm:mb-6 sm:p-6">
+          <div className="mb-5 flex items-start gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#f5ede3] text-[#795238]">
+              <svg aria-hidden="true" className="h-5 w-5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" viewBox="0 0 24 24">
+                <rect x="3.5" y="5" width="17" height="15.5" rx="2" />
+                <path d="M7.5 3.5v3M16.5 3.5v3M3.5 9.5h17" />
+              </svg>
+            </span>
+            <div>
+              <h3 className="font-bold">Periode keuangan</h3>
+              <p className="mt-1 text-xs leading-5 text-[#88796e] sm:text-sm">
+              Pilih periode untuk melihat ringkasan keuangan.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
+            <div>
+              <label className="mb-2 block text-xs font-semibold text-[#695544]">
+                Tanggal Awal
+              </label>
+              <input
+                type="date"
+                value={tanggalMulai}
+                onChange={(e) => {
+                  const nilai = e.target.value;
+                  setTanggalMulai(nilai);
+                  if (nilai > tanggalAkhir) {
+                    setPesan("Tanggal awal tidak boleh melebihi tanggal akhir.");
+                    setMemuat(false);
+                  } else {
+                    setPesan("");
+                    setMemuat(true);
+                  }
+                }}
+                className="w-full rounded-xl border border-[#e5d8c8] bg-[#fffdfa] px-3 py-3 text-sm outline-none transition focus:border-[#9b7049] focus:ring-4 focus:ring-[#9b7049]/10 sm:px-4"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-xs font-semibold text-[#695544]">
+                Tanggal Akhir
+              </label>
+              <input
+                type="date"
+                value={tanggalAkhir}
+                onChange={(e) => {
+                  const nilai = e.target.value;
+                  setTanggalAkhir(nilai);
+                  if (tanggalMulai > nilai) {
+                    setPesan("Tanggal awal tidak boleh melebihi tanggal akhir.");
+                    setMemuat(false);
+                  } else {
+                    setPesan("");
+                    setMemuat(true);
+                  }
+                }}
+                className="w-full rounded-xl border border-[#e5d8c8] bg-[#fffdfa] px-3 py-3 text-sm outline-none transition focus:border-[#9b7049] focus:ring-4 focus:ring-[#9b7049]/10 sm:px-4"
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={ambilData}
+              disabled={memuat}
+              className="group inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-[#795238]/20 bg-[#f8f3ec] px-5 py-3 text-sm font-semibold text-[#67452e] transition duration-200 hover:-translate-y-0.5 hover:border-[#795238]/40 hover:bg-[#f1e7d8] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#a96732] disabled:cursor-wait disabled:opacity-60 motion-reduce:transform-none"
+            >
+              <svg aria-hidden="true" className={`h-4 w-4 ${memuat ? "animate-spin" : "transition-transform duration-300 group-hover:rotate-180"}`} fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24">
+                <path d="M20 7v5h-5M4 17v-5h5" />
+                <path d="M5.6 9A7 7 0 0 1 17.5 6L20 12M4 12l2.5 6A7 7 0 0 0 18.4 15" />
+              </svg>
+              {memuat ? "Memuat..." : "Perbarui data"}
+            </button>
+          </div>
+        </section>
+
+        {/* RINGKASAN */}
+        <section className="no-print mb-5 grid gap-3 sm:mb-6 sm:grid-cols-2 sm:gap-4 xl:grid-cols-3">
+
+          <div className="dashboard-enter dashboard-card rounded-2xl border border-[#eadfce]/90 bg-white/90 p-5 shadow-[0_12px_34px_-26px_rgba(64,43,26,0.36)] sm:p-6">
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-[#88796e]">
+                Total Penjualan
+              </p>
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#edf5ed] text-[#4c8059]">
+                <svg aria-hidden="true" className="h-5 w-5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24">
+                  <path d="M7 17 17 7M8 7h9v9" />
+                </svg>
+              </span>
+            </div>
+
+            <h3 className="mt-4 break-words text-xl font-bold tracking-tight sm:text-2xl">
+              {memuat ? "Memuat..." : rupiah(totalPenjualan)}
+            </h3>
+
+            <p className="mt-2 text-xs text-[#88796e]">
+              {penjualan.length} transaksi penjualan
+            </p>
+          </div>
+
+          <div className="dashboard-enter dashboard-card rounded-2xl border border-[#eadfce]/90 bg-white/90 p-5 shadow-[0_12px_34px_-26px_rgba(64,43,26,0.36)] sm:p-6" style={{ animationDelay: "80ms" }}>
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-[#88796e]">
+                Total Pengeluaran
+              </p>
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#fbefea] text-[#a15b3c]">
+                <svg aria-hidden="true" className="h-5 w-5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24">
+                  <path d="m7 7 10 10M8 17h9V8" />
+                </svg>
+              </span>
+            </div>
+
+            <h3 className="mt-4 break-words text-xl font-bold tracking-tight sm:text-2xl">
+              {memuat ? "Memuat..." : rupiah(totalPengeluaran)}
+            </h3>
+
+            <p className="mt-2 text-xs text-[#88796e]">
+              {pengeluaran.length} nota pembelian
+            </p>
+          </div>
+
+          <div className="dashboard-enter dashboard-card rounded-2xl border border-[#eadfce]/90 bg-white/90 p-5 shadow-[0_12px_34px_-26px_rgba(64,43,26,0.36)] sm:col-span-2 sm:p-6 xl:col-span-1" style={{ animationDelay: "160ms" }}>
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-[#88796e]">
+                {labaRugi >= 0 ? "Selisih Positif" : "Selisih Negatif"}
+              </p>
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#f5ede3] text-[#795238]">
+                <svg aria-hidden="true" className="h-5 w-5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" viewBox="0 0 24 24">
+                  <path d="M12 3.5 14.6 9l5.9.9-4.3 4.2 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.3-4.2 5.9-.9L12 3.5Z" />
+                </svg>
+              </span>
+            </div>
+
+            <h3
+              className={`mt-4 break-words text-xl font-bold tracking-tight sm:text-2xl ${
+                labaRugi >= 0 ? "text-green-700" : "text-red-600"
+              }`}
+            >
+              {memuat ? "Memuat..." : rupiah(Math.abs(labaRugi))}
+            </h3>
+
+            <p className="mt-2 text-xs text-[#88796e]">
+              {labaRugi >= 0
+                ? "Penjualan lebih besar dari pengeluaran"
+                : "Pengeluaran lebih besar dari penjualan"}
+            </p>
+          </div>
+        </section>
+
+        {/* TOMBOL PEMBELIAN */}
+        <section className="no-print dashboard-enter dashboard-card mb-5 rounded-2xl border border-[#eadfce]/90 bg-white/90 p-4 shadow-[0_12px_34px_-26px_rgba(64,43,26,0.36)] sm:mb-6 sm:p-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#f5ede3] text-[#795238]">
+                <svg aria-hidden="true" className="h-5 w-5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" viewBox="0 0 24 24">
+                  <path d="M4 7.5h16M6.5 4v3.5M17.5 4v3.5M5 10.5h14v9H5z" />
+                  <path d="M8 14h3M8 17h6" />
+                </svg>
+              </span>
+              <div>
+                <h3 className="text-lg font-bold">Catatan pembelian</h3>
+                <p className="mt-1 max-w-lg text-sm leading-5 text-[#88796e]">
+                  Masukkan beberapa barang dalam satu nota pembelian.
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              aria-expanded={formTerbuka}
+              onClick={() => {
+                setFormTerbuka(!formTerbuka);
+                setPesan("");
+              }}
+              className="group inline-flex min-h-12 w-full items-center justify-center gap-2.5 rounded-xl bg-gradient-to-r from-[#795238] to-[#5c3c29] px-5 py-3 text-sm font-bold text-white shadow-[0_8px_18px_-10px_rgba(64,43,26,0.75)] transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_12px_22px_-10px_rgba(64,43,26,0.65)] focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#a96732] active:translate-y-0 sm:w-auto motion-reduce:transform-none"
+            >
+              <span className={`flex h-6 w-6 items-center justify-center rounded-lg bg-white/15 transition-transform duration-300 ${formTerbuka ? "rotate-45" : "group-hover:scale-110"}`}>
+                <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </span>
+              {formTerbuka ? "Tutup formulir" : "Catat pembelian"}
+            </button>
+          </div>
+
+          {formTerbuka && (
+            <form onSubmit={simpanPembelian} className="dashboard-enter mt-6 border-t border-[#eee5da] pt-6 sm:mt-7 sm:pt-7">
+
+              <div className="mb-6 grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-sm font-semibold text-[#695544]">
+                    Tanggal Pembelian
+                  </label>
+                  <input
+                    type="date"
+                    value={tanggal}
+                    onChange={(e) => setTanggal(e.target.value)}
+                    required
+                    className="w-full rounded-xl border border-[#e5d8c8] bg-[#fffdfa] px-4 py-3 text-sm outline-none transition focus:border-[#9b7049] focus:ring-4 focus:ring-[#9b7049]/10"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm font-semibold text-[#695544]">
+                    Kategori Pembelian
+                  </label>
+                  <select
+                    value={kategori}
+                    onChange={(e) => setKategori(e.target.value)}
+                    className="w-full rounded-xl border border-[#e5d8c8] bg-[#fffdfa] px-4 py-3 text-sm outline-none transition focus:border-[#9b7049] focus:ring-4 focus:ring-[#9b7049]/10"
+                  >
+                    {kategoriPilihan.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 className="font-bold">Daftar Barang</h4>
+                  <p className="mt-1 text-xs text-[#88796e]">
+                    Isi nama barang dan harga totalnya.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={tambahBarang}
+                  className="group inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-[#d9c5af] bg-white px-4 py-2 text-sm font-semibold text-[#67452e] transition duration-200 hover:-translate-y-0.5 hover:border-[#a4774d] hover:bg-[#fbf7f1] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#a96732] motion-reduce:transform-none"
+                >
+                  <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#f5ede3] text-[#795238] transition-colors group-hover:bg-[#795238] group-hover:text-white">
+                    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="2" viewBox="0 0 24 24">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </span>
+                  Tambah barang
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                {barang.map((item, index) => (
+                  <div
+                    key={item.id}
+                    className="dashboard-enter rounded-2xl border border-[#eadfce] bg-[#fcfaf7] p-4 transition-colors hover:border-[#d7bea5] sm:p-5"
+                  >
+                    <div className="mb-3 flex items-center justify-between">
+                      <span className="flex items-center gap-2 text-sm font-bold text-[#513a2b]">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#f0e5d5] text-xs text-[#795238]">
+                          {index + 1}
+                        </span>
+                        Rincian barang
+                      </span>
+
+                      <button
+                        type="button"
+                        aria-label={`Hapus barang ${index + 1}`}
+                        onClick={() => hapusBarang(item.id)}
+                        className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-[#a34c3b] transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+                      >
+                        <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" viewBox="0 0 24 24">
+                          <path d="M4 7h16M10 11v6M14 11v6M5.5 7l1 13h11l1-13M9 7V4h6v3" />
+                        </svg>
+                        Hapus
+                      </button>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <input
+                        type="text"
+                        placeholder="Nama barang, misalnya tepung terigu"
+                        value={item.nama}
+                        aria-label={`Nama barang ${index + 1}`}
+                        onChange={(e) =>
+                          ubahBarang(item.id, "nama", e.target.value)
+                        }
+                        required
+                        className="w-full rounded-xl border border-[#e5d8c8] bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b5a797] focus:border-[#9b7049] focus:ring-4 focus:ring-[#9b7049]/10"
+                      />
+
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        placeholder="Harga total barang"
+                        value={item.harga}
+                        aria-label={`Harga barang ${index + 1}`}
+                        onChange={(e) =>
+                          ubahBarang(item.id, "harga", e.target.value)
+                        }
+                        required
+                        className="w-full rounded-xl border border-[#e5d8c8] bg-white px-4 py-3 text-sm outline-none transition placeholder:text-[#b5a797] focus:border-[#9b7049] focus:ring-4 focus:ring-[#9b7049]/10"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-5 rounded-2xl border border-[#eadfce] bg-gradient-to-br from-[#faf6ef] to-[#f2e9dd] p-4 sm:p-5">
+                <p className="text-xs text-[#88796e]">
+                  Jumlah jenis barang: {barang.length}
+                </p>
+
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <span className="font-bold">Total Pembelian</span>
+                  <span className="text-xl font-bold text-[#795238]">
+                    {rupiah(totalPembelian)}
+                  </span>
+                </div>
+              </div>
+
+              {pesan && (
+                <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">
+                  {pesan}
+                </p>
+              )}
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="group mt-5 inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#795238] to-[#5c3c29] px-5 py-3 font-bold text-white shadow-[0_8px_18px_-10px_rgba(64,43,26,0.75)] transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_12px_22px_-10px_rgba(64,43,26,0.65)] focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#a96732] disabled:cursor-wait disabled:opacity-60 motion-reduce:transform-none"
+              >
+                {loading ? (
+                  <>
+                    <svg aria-hidden="true" className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="3" />
+                      <path className="opacity-80" fill="currentColor" d="M12 3a9 9 0 0 1 9 9h-3a6 6 0 0 0-6-6V3Z" />
+                    </svg>
+                    Menyimpan...
+                  </>
+                ) : (
+                  <>
+                    <svg aria-hidden="true" className="h-4 w-4 transition-transform group-hover:translate-x-0.5 motion-reduce:transform-none" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24">
+                      <path d="m5 12 4 4L19 6" />
+                    </svg>
+                    Simpan nota pembelian
+                  </>
+                )}
+              </button>
+            </form>
+          )}
+        </section>
+
+        {/* PESAN */}
+        {pesan && !formTerbuka && (
+          <div role="status" className="no-print dashboard-enter mb-5 rounded-xl border border-[#e7d8c5] bg-[#f8f2e9] p-4 text-sm text-[#795238]">
             {pesan}
           </div>
         )}
 
-        <section aria-label="Ringkasan pengeluaran" className="grid gap-4 sm:grid-cols-2">
-          <article className="dashboard-enter dashboard-card relative overflow-hidden rounded-3xl border border-[#634430] bg-gradient-to-br from-[#493126] via-[#704a36] to-[#9b684b] p-5 text-white shadow-[0_18px_40px_-24px_rgba(64,43,26,0.55)] sm:p-6">
-            <div aria-hidden="true" className="absolute -right-9 -top-12 h-36 w-36 rounded-full border-[22px] border-[#f1c99f]/[0.14]" />
-            <div className="relative flex items-start justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium text-white/75">Total pengeluaran</p>
-                <p className="mt-4 break-words text-2xl font-semibold tracking-tight tabular-nums sm:text-3xl">
-                  {formatRupiah(totalPengeluaran)}
-                </p>
-              </div>
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#f1c99f]/15 text-xl text-[#f1c99f]" aria-hidden="true">
-                ↘
-              </span>
-            </div>
-            <p className="relative mt-3 text-xs leading-5 text-white/70">
-              {data.length} catatan biaya tersimpan
-            </p>
-          </article>
-
-          <article
-            className="dashboard-enter dashboard-card rounded-3xl border border-[#eae4db] bg-white/90 p-5 shadow-[0_10px_30px_-22px_rgba(64,43,26,0.28)] sm:p-6"
-            style={{ animationDelay: "90ms" }}
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium text-[#78695a]">Pengeluaran bulan ini</p>
-                <p className="mt-4 break-words text-2xl font-semibold tracking-tight text-[#35291f] tabular-nums sm:text-3xl">
-                  {formatRupiah(totalBulanIni)}
-                </p>
-              </div>
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#f8e9e5] text-lg text-[#a35646]" aria-hidden="true">
-                ◷
-              </span>
-            </div>
-            <p className="mt-3 text-xs leading-5 text-[#a08b7c]">
-              Berdasarkan bulan pada tanggal terpilih
-            </p>
-          </article>
-        </section>
-
-        <section className="dashboard-enter rounded-3xl border border-[#eae4db] bg-white/95 p-5 shadow-[0_14px_38px_-28px_rgba(64,43,26,0.35)] sm:p-7">
-          <div className="flex items-start gap-4">
-            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#f7eddf] text-xl text-[#91633c]" aria-hidden="true">
-              ＋
+        {/* RIWAYAT PENGELUARAN */}
+        <section className="no-print dashboard-enter mb-5 rounded-2xl border border-[#eadfce]/90 bg-white/90 p-4 shadow-[0_12px_34px_-26px_rgba(64,43,26,0.36)] sm:mb-6 sm:p-6">
+          <div className="mb-5 flex items-start gap-3 sm:mb-6">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#f5ede3] text-[#795238]">
+              <svg aria-hidden="true" className="h-5 w-5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" viewBox="0 0 24 24">
+                <path d="M5 5.5h14A1.5 1.5 0 0 1 20.5 7v12H3.5V7A1.5 1.5 0 0 1 5 5.5Z" />
+                <path d="M7.5 3.5v4M16.5 3.5v4M3.5 10h17M7.5 14h2M12 14h2M7.5 17h2M12 17h2" />
+              </svg>
             </span>
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#a07853]">
-                Pencatatan biaya
-              </p>
-              <h2 className="mt-1 text-xl font-semibold tracking-tight text-[#38291f]">
-                Tambah pengeluaran
-              </h2>
-              <p className="mt-1 text-sm text-[#8a7568]">
-                Lengkapi informasi biaya usaha di bawah ini.
-              </p>
+            <h3 className="text-lg font-bold">
+              Riwayat Pengeluaran
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-[#88796e] sm:text-sm">
+              Daftar pembelian berdasarkan periode yang dipilih.
+            </p>
             </div>
           </div>
 
-          <form onSubmit={simpanPengeluaran} className="mt-6 space-y-5">
-            <div className="grid gap-5 sm:grid-cols-2">
-              <label className="block text-sm font-medium text-[#59483a]">
-                Tanggal
-                <input
-                  type="date"
-                  value={tanggal}
-                  onChange={(e) => setTanggal(e.target.value)}
-                  required
-                  className="mt-2 h-12 w-full rounded-xl border border-[#e5ded4] bg-[#faf8f4] px-4 text-sm font-normal text-[#45372b] outline-none transition hover:border-[#d3c4b2] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
-                />
-              </label>
-
-              <label className="block text-sm font-medium text-[#59483a]">
-                Kategori
-                <select
-                  value={kategori}
-                  onChange={(e) => setKategori(e.target.value)}
-                  className="mt-2 h-12 w-full rounded-xl border border-[#e5ded4] bg-[#faf8f4] px-4 text-sm font-normal text-[#45372b] outline-none transition hover:border-[#d3c4b2] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
-                >
-                  <option>Bahan Baku</option>
-                  <option>Gaji Karyawan</option>
-                  <option>Listrik dan Air</option>
-                  <option>Transportasi</option>
-                  <option>Peralatan</option>
-                  <option>Operasional</option>
-                  <option>Lainnya</option>
-                </select>
-              </label>
-
-              <label className="block text-sm font-medium text-[#59483a]">
-                Keterangan
-                <input
-                  value={keterangan}
-                  onChange={(e) => setKeterangan(e.target.value)}
-                  placeholder="Contoh: pembelian tepung"
-                  required
-                  className="mt-2 h-12 w-full rounded-xl border border-[#e5ded4] bg-[#faf8f4] px-4 text-sm font-normal text-[#45372b] outline-none transition placeholder:text-[#a08b7c] hover:border-[#d3c4b2] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
-                />
-              </label>
-
-              <label className="block text-sm font-medium text-[#59483a]">
-                Jumlah (Rp)
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={jumlah}
-                  onChange={(e) => setJumlah(e.target.value)}
-                  placeholder="Contoh: 150000"
-                  required
-                  className="mt-2 h-12 w-full rounded-xl border border-[#e5ded4] bg-[#faf8f4] px-4 text-sm font-normal text-[#45372b] outline-none transition placeholder:text-[#a08b7c] hover:border-[#d3c4b2] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
-                />
-              </label>
-
-              <label className="block text-sm font-medium text-[#59483a]">
-                Metode Pembayaran
-                <select
-                  value={metode}
-                  onChange={(e) => setMetode(e.target.value)}
-                  className="mt-2 h-12 w-full rounded-xl border border-[#e5ded4] bg-[#faf8f4] px-4 text-sm font-normal text-[#45372b] outline-none transition hover:border-[#d3c4b2] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
-                >
-                  <option>Tunai</option>
-                  <option>Transfer</option>
-                  <option>QRIS</option>
-                  <option>Lainnya</option>
-                </select>
-              </label>
-
-              <label className="block text-sm font-medium text-[#59483a]">
-                Catatan <span className="font-normal text-[#a08b7c]">(opsional)</span>
-                <input
-                  value={catatan}
-                  onChange={(e) => setCatatan(e.target.value)}
-                  placeholder="Catatan tambahan"
-                  className="mt-2 h-12 w-full rounded-xl border border-[#e5ded4] bg-[#faf8f4] px-4 text-sm font-normal text-[#45372b] outline-none transition placeholder:text-[#a08b7c] hover:border-[#d3c4b2] focus:border-[#8d6245] focus:bg-white focus:ring-4 focus:ring-[#8d6245]/10"
-                />
-              </label>
+          {memuat ? (
+            <div className="flex items-center justify-center gap-3 py-10 text-sm text-[#88796e]" role="status">
+              <span className="h-5 w-5 animate-spin rounded-full border-2 border-[#d9c5af] border-t-[#795238]" />
+              Memuat data...
             </div>
-
-            <div className="border-t border-[#eee8df] pt-5">
-            <p className="mb-4 text-xs leading-5 text-[#938678]">
-              Pastikan jumlah sesuai bukti pembayaran. Catatan tambahan bersifat opsional.
-            </p>
-            <button
-              type="submit"
-              disabled={saving}
-              className="min-h-12 w-full rounded-xl bg-[#65412f] px-6 py-3 text-sm font-semibold text-white shadow-[0_8px_18px_-10px_rgba(74,48,36,0.8)] transition hover:-translate-y-0.5 hover:bg-[#4b3024] hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#70452f] active:translate-y-0 disabled:cursor-wait disabled:opacity-60 sm:w-auto"
-            >
-              {saving ? "Menyimpan..." : "Simpan pengeluaran"}
-            </button>
+          ) : pengeluaran.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-[#dfd0bd] bg-[#fcfaf7] px-5 py-10 text-center">
+              <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-[#f3eadf] text-[#8b6b4c]">
+                <svg aria-hidden="true" className="h-6 w-6" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" viewBox="0 0 24 24">
+                  <path d="M5 5.5h14A1.5 1.5 0 0 1 20.5 7v12H3.5V7A1.5 1.5 0 0 1 5 5.5Z" />
+                  <path d="M8 11h8M8 15h5" />
+                </svg>
+              </span>
+              <p className="mt-3 text-sm font-semibold text-[#513a2b]">
+                Belum ada pengeluaran
+              </p>
+              <p className="mt-1 text-xs text-[#88796e]">
+                Nota pembelian pada periode ini akan muncul di sini.
+              </p>
             </div>
-          </form>
+          ) : (
+            <>
+              <div className="space-y-3 md:hidden">
+                {pengeluaran.map((item, index) => (
+                  <article key={item.id} className="rounded-2xl border border-[#eadfce] bg-[#fffdfa] p-4 shadow-[0_8px_24px_-22px_rgba(64,43,26,0.5)]">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-start gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#f5ede3] text-xs font-bold text-[#795238]">
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-[#88796e]">
+                            {formatTanggal(item.tanggal_pengeluaran)}
+                          </p>
+                          <p className="mt-1 break-words text-sm font-semibold leading-5 text-[#513a2b]">
+                            {item.kategori}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => hapusPengeluaran(item.id)}
+                        aria-label={`Hapus nota pembelian ${formatTanggal(item.tanggal_pengeluaran)}`}
+                        className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[#a34c3b] transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+                      >
+                        <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24">
+                          <path d="M4 7h16M10 11v6M14 11v6M5.5 7l1 13h11l1-13M9 7V4h6v3" />
+                        </svg>
+                      </button>
+                    </div>
+                    <div className="mt-4 flex items-center justify-between gap-3 border-t border-[#f0e9df] pt-3">
+                      <span className="text-xs text-[#88796e]">Total nota</span>
+                      <strong className="text-sm text-[#795238]">
+                        {rupiah(Number(item.jumlah))}
+                      </strong>
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              <div className="hidden overflow-x-auto rounded-xl border border-[#eee5da] md:block">
+              <table className="w-full min-w-[650px] text-left text-sm">
+                <thead>
+                  <tr className="border-b border-[#eadfce] bg-[#fcfaf7] text-xs uppercase tracking-wide text-[#88796e]">
+                    <th className="px-3 py-4">No.</th>
+                    <th className="px-3 py-4">Tanggal</th>
+                    <th className="px-3 py-4">Rincian Pembelian</th>
+                    <th className="px-3 py-4 text-right">Jumlah</th>
+                    <th className="px-3 py-4 text-right">Aksi</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {pengeluaran.map((item, index) => (
+                    <tr
+                      key={item.id}
+                      className="border-b border-[#f0e9df] transition-colors last:border-0 hover:bg-[#fcfaf7]"
+                    >
+                      <td className="px-3 py-4">{index + 1}</td>
+
+                      <td className="px-3 py-4">
+                        {formatTanggal(item.tanggal_pengeluaran)}
+                      </td>
+
+                      <td className="max-w-[350px] px-3 py-4">
+                        {item.kategori}
+                      </td>
+
+                      <td className="px-3 py-4 text-right font-semibold">
+                        {rupiah(Number(item.jumlah))}
+                      </td>
+
+                      <td className="px-3 py-4 text-right">
+                        <button
+                          type="button"
+                          onClick={() => hapusPengeluaran(item.id)}
+                          aria-label={`Hapus nota pembelian ${formatTanggal(item.tanggal_pengeluaran)}`}
+                          className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold text-[#a34c3b] transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+                        >
+                          <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24">
+                            <path d="M4 7h16M10 11v6M14 11v6M5.5 7l1 13h11l1-13M9 7V4h6v3" />
+                          </svg>
+                          Hapus
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            </>
+          )}
         </section>
 
-        <section className="dashboard-enter overflow-hidden rounded-3xl border border-[#eae4db] bg-white/95 shadow-[0_14px_38px_-28px_rgba(64,43,26,0.35)]">
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#f0e7df] p-5 sm:px-6 sm:py-5">
+        {/* LAPORAN LABA RUGI */}
+        <section className="print-area rounded-2xl border border-[#eadfce] bg-white p-4 shadow-[0_12px_34px_-26px_rgba(64,43,26,0.36)] sm:p-6 md:p-8">
+
+          <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#a07853]">
-                Arsip biaya
+              <p className="text-xs font-bold tracking-[0.2em] text-[#a4774d]">
+                PURI DONUT&apos;S
               </p>
-              <h2 className="mt-1 text-lg font-semibold tracking-tight text-[#3b2b21]">
-                Riwayat pengeluaran
+
+              <h2 className="mt-2 text-2xl font-bold">
+                Laporan Laba Rugi
               </h2>
-              <p className="mt-1 text-xs text-[#8a7568]">
-                {data.length} catatan tersimpan
+
+              <p className="mt-2 text-sm text-[#88796e]">
+                Periode {formatTanggal(tanggalMulai)} sampai{" "}
+                {formatTanggal(tanggalAkhir)}
               </p>
             </div>
 
             <button
               type="button"
-              onClick={() => void ambilData()}
-              disabled={loading}
-              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-[#e5ded4] bg-white px-4 py-2 text-sm font-semibold text-[#705a48] transition hover:border-[#cbb49c] hover:bg-[#faf7f1] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8d6245] disabled:cursor-wait disabled:opacity-50"
+              onClick={cetakLaporan}
+              disabled={memuat}
+              className="no-print inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#795238] to-[#5c3c29] px-5 py-3 text-sm font-bold text-white shadow-[0_8px_18px_-10px_rgba(64,43,26,0.75)] transition duration-200 hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#a96732] disabled:cursor-wait disabled:opacity-60 sm:w-auto motion-reduce:transform-none"
             >
-              <span aria-hidden="true" className={loading ? "animate-spin" : ""}>↻</span>
-              {loading ? "Memuat..." : "Perbarui"}
+              <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" viewBox="0 0 24 24">
+                <path d="M7 8V4h10v4M7 17H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-2" />
+                <path d="M7 14h10v6H7zM17 12h.01" />
+              </svg>
+              Print / Cetak PDF
             </button>
           </div>
 
-          {loading ? (
-            <div role="status" className="flex min-h-40 flex-col items-center justify-center p-6 text-sm text-[#8a7568]">
-              <span className="h-7 w-7 animate-spin rounded-full border-[3px] border-[#e8ded1] border-t-[#70452d]" />
-              <p className="mt-3">Memuat catatan pengeluaran...</p>
-            </div>
-          ) : data.length === 0 ? (
-            <div className="px-5 py-10 text-center sm:px-6">
-              <span className="mx-auto flex h-11 w-11 items-center justify-center rounded-full bg-[#f7eddf] text-lg text-[#91633c]" aria-hidden="true">↘</span>
-              <p className="mt-3 text-sm font-medium text-[#5d5044]">
-                Belum ada pengeluaran yang tercatat.
-              </p>
-              <p className="mt-1 text-xs text-[#938678]">
-                Catatan biaya yang Anda simpan akan muncul di sini.
-              </p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto p-4 sm:p-6">
-              <div className="overflow-hidden rounded-2xl border border-[#eee8df]">
-                <table className="w-full min-w-[760px] text-left text-sm">
-                  <thead className="bg-[#faf8f4] text-[10px] uppercase tracking-[0.14em] text-[#8a7568]">
-                    <tr>
-                      <th scope="col" className="px-4 py-3.5 font-semibold">Tanggal</th>
-                      <th scope="col" className="px-4 py-3.5 font-semibold">Kategori</th>
-                      <th scope="col" className="px-4 py-3.5 font-semibold">Keterangan</th>
-                      <th scope="col" className="px-4 py-3.5 font-semibold">Metode</th>
-                      <th scope="col" className="px-4 py-3.5 text-right font-semibold">Jumlah</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.map((item, index) => (
-                      <tr
-                        key={item.id}
-                        style={{ animationDelay: `${Math.min(index * 35, 350)}ms` }}
-                        className="dashboard-enter border-t border-[#f0ebe4] transition-colors first:border-0 hover:bg-[#fcfaf7]"
-                      >
-                        <td className="whitespace-nowrap px-4 py-4 text-xs text-[#766858]">
-                          {formatTanggal(item.tanggal_pengeluaran)}
-                        </td>
-                        <td className="px-4 py-4">
-                          <span className="inline-flex rounded-full border border-[#eee5d9] bg-[#faf7f1] px-2.5 py-1 text-[11px] font-semibold text-[#80644e]">
-                            {item.kategori}
-                          </span>
-                        </td>
-                        <td className="px-4 py-4">
-                          <div className="font-medium text-[#49382b]">{item.keterangan}</div>
-                          {item.catatan && (
-                            <div className="mt-1 text-xs text-[#8a7568]">
-                              {item.catatan}
-                            </div>
-                          )}
-                        </td>
-                        <td className="px-4 py-4 text-[#766858]">{item.metode_pembayaran || "—"}</td>
-                        <td className="whitespace-nowrap px-4 py-4 text-right font-semibold tracking-tight text-[#49382b] tabular-nums">
-                          {formatRupiah(Number(item.jumlah))}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          <div className="mb-6 border-t border-[#eadfce] pt-5">
+            <h3 className="mb-5 font-bold">Ringkasan Keuangan</h3>
+
+            <div className="space-y-4 text-sm">
+              <div className="flex justify-between gap-3">
+                <span>Total Pemasukan Penjualan</span>
+                <strong>{rupiah(totalPenjualan)}</strong>
+              </div>
+
+              <div className="flex justify-between gap-3">
+                <span>Total Pengeluaran</span>
+                <strong>{rupiah(totalPengeluaran)}</strong>
+              </div>
+
+              <div className="border-t border-dashed border-[#d9cbb9] pt-4">
+                <div className="flex justify-between gap-3 text-base font-bold">
+                  <span>
+                    {labaRugi >= 0 ? "Selisih Positif" : "Selisih Negatif"}
+                  </span>
+
+                  <span
+                    className={
+                      labaRugi >= 0 ? "text-green-700" : "text-red-600"
+                    }
+                  >
+                    {rupiah(Math.abs(labaRugi))}
+                  </span>
+                </div>
               </div>
             </div>
-          )}
+          </div>
+
+          <div className="mb-7">
+            <h3 className="mb-3 font-bold">Rincian Penjualan</h3>
+
+            {penjualan.length === 0 ? (
+              <p className="text-sm text-[#88796e]">
+                Tidak ada penjualan pada periode ini.
+              </p>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-[#eee5da]">
+              <table className="w-full min-w-[380px] text-left text-sm">
+                <thead>
+                  <tr className="bg-[#f8f5ef]">
+                    <th className="px-3 py-3">Tanggal</th>
+                    <th className="px-3 py-3 text-right">
+                      Total Penjualan
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {penjualan.map((item) => (
+                    <tr
+                      key={item.id}
+                      className="border-b border-[#eee5da]"
+                    >
+                      <td className="px-3 py-3">
+                        {formatTanggal(item.tanggal_penjualan)}
+                      </td>
+                      <td className="px-3 py-3 text-right">
+                        {rupiah(Number(item.total_penjualan))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <h3 className="mb-3 font-bold">Rincian Pengeluaran</h3>
+
+            {pengeluaran.length === 0 ? (
+              <p className="text-sm text-[#88796e]">
+                Tidak ada pengeluaran pada periode ini.
+              </p>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-[#eee5da]">
+              <table className="w-full min-w-[520px] text-left text-sm">
+                <thead>
+                  <tr className="bg-[#f8f5ef]">
+                    <th className="px-3 py-3">Tanggal</th>
+                    <th className="px-3 py-3">Keterangan</th>
+                    <th className="px-3 py-3 text-right">Jumlah</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {pengeluaran.map((item) => (
+                    <tr
+                      key={item.id}
+                      className="border-b border-[#eee5da]"
+                    >
+                      <td className="px-3 py-3">
+                        {formatTanggal(item.tanggal_pengeluaran)}
+                      </td>
+                      <td className="px-3 py-3">{item.kategori}</td>
+                      <td className="px-3 py-3 text-right">
+                        {rupiah(Number(item.jumlah))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-8 border-t border-[#eadfce] pt-4 text-xs leading-6 text-[#88796e]">
+            <p>
+              Laporan ini dibuat otomatis berdasarkan data transaksi
+              penjualan dan pengeluaran yang tercatat di sistem.
+            </p>
+            <p>
+              Dicetak pada: {new Date().toLocaleString("id-ID")}
+            </p>
+            <p className="mt-2">
+              Catatan: hasil perhitungan merupakan penjualan dikurangi
+              pengeluaran yang tercatat, belum memperhitungkan seluruh
+              komponen HPP, pajak, dan penyusutan.
+            </p>
+          </div>
         </section>
-      </div>
-    </main>
+
+        <footer className="no-print py-8 text-center text-xs text-[#a18e7d]">
+          &copy; {new Date().getFullYear()} Puri Donut&apos;s Financial Management
+        </footer>
+
+      </main>
+    </div>
   );
 }
